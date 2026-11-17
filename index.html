@@ -346,6 +346,35 @@
   .vol-row svg{ width:15px; height:15px; fill:var(--ivory-dim); flex-shrink:0; }
   .vol-row input{ margin-top:0; }
 
+  .app-version{
+    margin-top:4px; font-size:11px; opacity:.4; letter-spacing:.08em;
+  }
+  .update-bar{
+    position:fixed; left:50%; bottom:calc(16px + env(safe-area-inset-bottom));
+    transform:translate(-50%, 160%);
+    width:min(92vw, 420px);
+    display:flex; align-items:center; gap:10px;
+    padding:12px 12px 12px 16px;
+    background:rgba(36,19,9,.96);
+    border:1px solid var(--brass);
+    border-radius:14px;
+    box-shadow:0 10px 30px rgba(0,0,0,.55);
+    color:var(--ivory, #f5efe0);
+    z-index:50;
+    transition:transform .35s ease;
+  }
+  .update-bar.show{ transform:translate(-50%, 0); }
+  .update-text{ flex:1; display:flex; flex-direction:column; gap:2px; font-size:13px; line-height:1.4; }
+  .update-text strong{ color:var(--brass-light); font-size:14px; }
+  .update-text span{ opacity:.8; }
+  #updateBtn{
+    border:none; border-radius:10px; padding:9px 14px;
+    background:var(--brass); color:#241309; font-weight:700; font-size:14px; cursor:pointer;
+  }
+  #updateLater{
+    border:none; background:none; color:inherit; opacity:.6; font-size:16px; padding:6px; cursor:pointer;
+  }
+  @media (prefers-reduced-motion: reduce){ .update-bar{ transition:none; } }
   footer.hint{ color:var(--brass-light, #e0c48a); opacity:1; }
   footer{
     margin-top:auto;
@@ -405,6 +434,7 @@
       <option value="wood" selected>木魚音色</option>
       <option value="beep">電子嗶聲</option>
       <option value="bell">清脆鈴音</option>
+      <option value="guzheng">古箏撥弦</option>
     </select>
     <select id="timerSelect" aria-label="定時練習時長">
       <option value="0" selected>不限時</option>
@@ -431,6 +461,16 @@
   </div>
 
   <footer>進階觸控版 · 支援空白鍵與方向鍵操作</footer>
+  <div class="app-version" id="appVersion"></div>
+</div>
+
+<div class="update-bar" id="updateBar" role="status" aria-live="polite">
+  <div class="update-text">
+    <strong>有新版本可以更新</strong>
+    <span id="updateNotes"></span>
+  </div>
+  <button type="button" id="updateBtn">立即更新</button>
+  <button type="button" id="updateLater" aria-label="稍後再說">✕</button>
 </div>
 
 <script>
@@ -603,6 +643,11 @@
     soundStyle = e.target.value;
     saveSettings();
     triggerHaptic(10);
+    // 未播放時試聽一下新音色
+    if(!isPlaying){
+      ensureAudio();
+      playSound(audioCtx.currentTime + 0.03, true);
+    }
   });
 
   timerSelect.addEventListener('change', (e)=>{
@@ -656,6 +701,81 @@
     }
   }
 
+  // ---------- 古箏：Karplus-Strong 撥弦合成（每個音高只算一次並快取） ----------
+  // 古箏常用 D 調五聲音階：重拍 D5、一般拍 A4
+  const GUZHENG_NOTES = { accent: 587.33, normal: 440.00 };
+  const pluckCache = {};
+
+  function makePluckBuffer(freq){
+    const sr = audioCtx.sampleRate;
+    const dur = 1.6;
+    const len = Math.floor(sr * dur);
+    const buf = audioCtx.createBuffer(1, len, sr);
+    const out = buf.getChannelData(0);
+    const N = Math.max(2, Math.round(sr / freq));
+    // 初始激發：雜訊 + 輕微平滑，模擬指甲（義甲）撥弦偏亮的音色
+    const ring = new Float32Array(N);
+    let prev = 0;
+    for(let i=0;i<N;i++){
+      const r = Math.random()*2 - 1;
+      prev = prev*0.35 + r*0.65;
+      ring[i] = prev;
+    }
+    const decay = 0.9965;
+    let idx = 0;
+    for(let i=0;i<len;i++){
+      const a = ring[idx];
+      const b = ring[(idx+1) % N];
+      out[i] = a;
+      ring[idx] = decay * 0.5 * (a + b);
+      idx = (idx+1) % N;
+    }
+    // 正規化並在尾端淡出
+    let peak = 0;
+    for(let i=0;i<len;i++) peak = Math.max(peak, Math.abs(out[i]));
+    const fadeStart = Math.floor(len*0.8);
+    for(let i=0;i<len;i++){
+      let g = peak ? 0.9/peak : 1;
+      if(i > fadeStart) g *= 1 - (i - fadeStart)/(len - fadeStart);
+      out[i] *= g;
+    }
+    // Karplus-Strong 的實際音高 = sr/(N+0.5)，回傳修正倍率讓音準正確
+    return { buf, rate: freq / (sr / (N + 0.5)) };
+  }
+
+  function getPluck(key){
+    if(!pluckCache[key]) pluckCache[key] = makePluckBuffer(GUZHENG_NOTES[key]);
+    return pluckCache[key];
+  }
+
+  function playGuzheng(time, accent, vol){
+    const p = getPluck(accent ? 'accent' : 'normal');
+    const src = audioCtx.createBufferSource();
+    src.buffer = p.buf;
+    // 重拍加一點「上滑音」，模擬古箏按弦的韻味
+    if(accent){
+      src.playbackRate.setValueAtTime(p.rate * 0.97, time);
+      src.playbackRate.linearRampToValueAtTime(p.rate, time + 0.09);
+    } else {
+      src.playbackRate.setValueAtTime(p.rate, time);
+    }
+    // 琴身共鳴：低通柔化 + 中低頻微微增厚
+    const tone = audioCtx.createBiquadFilter();
+    tone.type = 'lowpass';
+    tone.frequency.setValueAtTime(accent ? 5200 : 4200, time);
+    const body = audioCtx.createBiquadFilter();
+    body.type = 'peaking';
+    body.frequency.value = 320;
+    body.Q.value = 1.2;
+    body.gain.value = 4;
+    const gain = audioCtx.createGain();
+    gain.gain.setValueAtTime(vol * (accent ? 1.0 : 0.85), time);
+    gain.gain.setTargetAtTime(0.0001, time + 0.6, 0.25);
+    src.connect(tone); tone.connect(body); body.connect(gain); gain.connect(audioCtx.destination);
+    src.start(time);
+    src.stop(time + 1.6);
+  }
+
   function playAccentPing(time){
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
@@ -674,9 +794,12 @@
     if(volume <= 0) return;
     const effectiveVol = Math.max(volume, 0.001);
 
-    if(accent) playAccentPing(time);
+    if(accent && soundStyle !== 'guzheng') playAccentPing(time);
 
-    if(soundStyle === 'wood'){
+    if(soundStyle === 'guzheng'){
+      playGuzheng(time, accent, effectiveVol);
+
+    } else if(soundStyle === 'wood'){
       // Woodblock sound simulation using filtered noise/sine combo or high-Q oscillators
       const osc = audioCtx.createOscillator();
       const gain = audioCtx.createGain();
@@ -913,14 +1036,87 @@
 
 })();
 
-// Service worker registration (offline caching on GitHub Pages)
-if('serviceWorker' in navigator){
+// ---------- 版本與自動更新通知 ----------
+var APP_VERSION = '1.3.0';
+(function(){
+  var verEl = document.getElementById('appVersion');
+  if(verEl) verEl.textContent = 'v' + APP_VERSION;
+
+  if(!('serviceWorker' in navigator)) return;
+
+  var bar = document.getElementById('updateBar');
+  var notesEl = document.getElementById('updateNotes');
+  var btn = document.getElementById('updateBtn');
+  var later = document.getElementById('updateLater');
+  var waitingWorker = null;
+  var refreshing = false;
+
+  function askVersion(worker){
+    // 向新版 Service Worker 詢問版本號與更新內容
+    return new Promise(function(resolve){
+      try{
+        var ch = new MessageChannel();
+        var done = false;
+        ch.port1.onmessage = function(e){ done = true; resolve(e.data || {}); };
+        worker.postMessage({type:'GET_VERSION'}, [ch.port2]);
+        setTimeout(function(){ if(!done) resolve({}); }, 1500);
+      }catch(e){ resolve({}); }
+    });
+  }
+
+  function showUpdate(worker){
+    waitingWorker = worker;
+    askVersion(worker).then(function(info){
+      var txt = info.version ? ('v' + APP_VERSION + ' → v' + info.version) : '';
+      if(info.notes) txt += (txt ? '：' : '') + info.notes;
+      notesEl.textContent = txt || '點「立即更新」載入最新版';
+      bar.classList.add('show');
+    });
+  }
+
+  btn.addEventListener('click', function(){
+    if(!waitingWorker) return;
+    btn.disabled = true;
+    btn.textContent = '更新中…';
+    waitingWorker.postMessage({type:'SKIP_WAITING'});
+  });
+  later.addEventListener('click', function(){ bar.classList.remove('show'); });
+
+  // 新版接手後自動重新整理一次
+  navigator.serviceWorker.addEventListener('controllerchange', function(){
+    if(refreshing) return;
+    refreshing = true;
+    location.reload();
+  });
+
   window.addEventListener('load', function(){
-    navigator.serviceWorker.register('./sw.js').catch(function(err){
+    navigator.serviceWorker.register('./sw.js').then(function(reg){
+      // 已有等待中的新版（例如上次開啟時就下載好了）
+      if(reg.waiting && navigator.serviceWorker.controller) showUpdate(reg.waiting);
+
+      reg.addEventListener('updatefound', function(){
+        var nw = reg.installing;
+        if(!nw) return;
+        nw.addEventListener('statechange', function(){
+          // 有舊版控制頁面時才算「更新」；第一次安裝不提示
+          if(nw.state === 'installed' && navigator.serviceWorker.controller){
+            showUpdate(nw);
+          }
+        });
+      });
+
+      // 開啟時、回到前景時、每 30 分鐘檢查一次是否有新版
+      function check(){ reg.update().catch(function(){}); }
+      check();
+      document.addEventListener('visibilitychange', function(){
+        if(!document.hidden) check();
+      });
+      setInterval(check, 30 * 60 * 1000);
+    }).catch(function(err){
       console.warn('Service worker registration failed:', err);
     });
   });
-}
+})();
 </script>
 </body>
 </html>

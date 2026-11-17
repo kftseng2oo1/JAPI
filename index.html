@@ -346,6 +346,17 @@
   .vol-row svg{ width:15px; height:15px; fill:var(--ivory-dim); flex-shrink:0; }
   .vol-row input{ margin-top:0; }
 
+  .song-btn{
+    border:1px solid var(--brass);
+    background:rgba(201,164,103,.12);
+    color:var(--brass-light);
+    border-radius:999px;
+    padding:10px 16px;
+    font-size:14px; letter-spacing:.06em;
+    cursor:pointer;
+  }
+  .song-btn[hidden]{ display:none; }
+  .song-btn.playing{ background:var(--brass); color:#241309; font-weight:700; }
   .app-version{
     margin-top:4px; font-size:11px; opacity:.4; letter-spacing:.08em;
   }
@@ -453,6 +464,7 @@
     <button class="play-btn" id="playBtn" aria-label="開始/暫停">
       <svg id="playIcon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
     </button>
+    <button class="song-btn" id="songBtn" type="button" hidden aria-label="古箏演奏一曲">🎵 彈一曲</button>
   </div>
 
   <div class="vol-row">
@@ -498,6 +510,7 @@
   const soundSelect = document.getElementById('soundStyle');
   const timerSelect = document.getElementById('timerSelect');
   const timerDisplay = document.getElementById('timerDisplay');
+  const songBtn = document.getElementById('songBtn');
   const tapBtn = document.getElementById('tapBtn');
   const playBtn = document.getElementById('playBtn');
   const playIcon = document.getElementById('playIcon');
@@ -643,6 +656,7 @@
     soundStyle = e.target.value;
     saveSettings();
     triggerHaptic(10);
+    updateSongBtn();
     // 未播放時試聽一下新音色
     if(!isPlaying){
       ensureAudio();
@@ -743,38 +757,95 @@
     return { buf, rate: freq / (sr / (N + 0.5)) };
   }
 
-  function getPluck(key){
-    if(!pluckCache[key]) pluckCache[key] = makePluckBuffer(GUZHENG_NOTES[key]);
+  function getPluck(freq){
+    const key = freq.toFixed(2);
+    if(!pluckCache[key]) pluckCache[key] = makePluckBuffer(freq);
     return pluckCache[key];
   }
 
-  function playGuzheng(time, accent, vol){
-    const p = getPluck(accent ? 'accent' : 'normal');
+  // 撥一根弦：freq 音高、vol 音量；opts.bend 上滑音幅度（例如 0.03 = 從低 3% 滑上來）
+  // opts.bright 亮度、opts.ring 餘音長度（秒）；回傳 source 以便中途停止
+  function playPluck(freq, time, vol, opts){
+    opts = opts || {};
+    const p = getPluck(freq);
     const src = audioCtx.createBufferSource();
     src.buffer = p.buf;
-    // 重拍加一點「上滑音」，模擬古箏按弦的韻味
-    if(accent){
-      src.playbackRate.setValueAtTime(p.rate * 0.97, time);
-      src.playbackRate.linearRampToValueAtTime(p.rate, time + 0.09);
+    if(opts.bend){
+      src.playbackRate.setValueAtTime(p.rate * (1 - opts.bend), time);
+      src.playbackRate.linearRampToValueAtTime(p.rate, time + (opts.bendTime || 0.09));
     } else {
       src.playbackRate.setValueAtTime(p.rate, time);
     }
     // 琴身共鳴：低通柔化 + 中低頻微微增厚
     const tone = audioCtx.createBiquadFilter();
     tone.type = 'lowpass';
-    tone.frequency.setValueAtTime(accent ? 5200 : 4200, time);
+    tone.frequency.setValueAtTime(opts.bright || 4600, time);
     const body = audioCtx.createBiquadFilter();
     body.type = 'peaking';
     body.frequency.value = 320;
     body.Q.value = 1.2;
     body.gain.value = 4;
     const gain = audioCtx.createGain();
-    gain.gain.setValueAtTime(vol * (accent ? 1.0 : 0.85), time);
-    gain.gain.setTargetAtTime(0.0001, time + 0.6, 0.25);
+    const ring = opts.ring || 0.6;
+    gain.gain.setValueAtTime(vol, time);
+    gain.gain.setTargetAtTime(0.0001, time + ring, 0.25);
     src.connect(tone); tone.connect(body); body.connect(gain); gain.connect(audioCtx.destination);
     src.start(time);
     src.stop(time + 1.6);
+    return src;
   }
+
+  function playGuzheng(time, accent, vol){
+    // 重拍加一點「上滑音」，模擬古箏按弦的韻味
+    playPluck(accent ? GUZHENG_NOTES.accent : GUZHENG_NOTES.normal, time,
+      vol * (accent ? 1.0 : 0.85),
+      { bend: accent ? 0.03 : 0, bright: accent ? 5200 : 4200 });
+  }
+
+  // ---------- 古箏小曲《竹林踏歌》（原創，D 調五聲音階，2/4 拍） ----------
+  // 簡譜 1=D：1 D5、2 E5、3 F#5、5 A5、6 B5；加 ' 為高八度、加 , 為低八度；0 為休止
+  // 每個音 [音名, 拍數]；音名後加 ~ 表示上滑音
+  const PITCH = {
+    "5,":440.00, "6,":493.88,
+    "1":587.33, "2":659.26, "3":739.99, "5":880.00, "6":987.77,
+    "1'":1174.66, "2'":1318.51, "3'":1479.98
+  };
+  const BASS = { A3:220.00, B3:246.94, D4:293.66, E4:329.63, "F#4":369.99, A4:440.00, B4:493.88 };
+  const FIFTH = { D4:'A4', A3:'E4', B3:'F#4', E4:'B4' };
+
+  const SECTION_A = [
+    { bass:'D4', m:[['5',.5],['6',.5],["1'",.5],['6',.5]] },
+    { bass:'A3', m:[['5',.5],['3',.5],['2',.5],['3',.5]] },
+    { bass:'D4', m:[['5',.5],['3',.25],['5',.25],['6',.5],['5',.5]] },
+    { bass:'A3', m:[['2~',1.5],['0',.5]] },
+    { bass:'D4', m:[['1',.5],['2',.5],['3',.5],['5',.5]] },
+    { bass:'B3', m:[['6',.5],['5',.5],['3',.5],['5',.5]] },
+    { bass:'A3', m:[['2',.5],['3',.25],['2',.25],['1',.5],['6,',.5]] },
+    { bass:'D4', m:[['1~',1.5],['0',.5]] }
+  ];
+  const SECTION_B = [
+    { bass:'D4', m:[["1'",.5],["1'",.5],['6',.5],["1'",.5]] },
+    { bass:'B3', m:[["2'",.5],["1'",.5],['6',.5],['5',.5]] },
+    { bass:'B3', m:[['6',.25],['6',.25],['5',.5],['6',.5],["1'",.5]] },
+    { bass:'D4', m:[["1'~",1.5],['0',.5]] },
+    { bass:'A3', m:[['5',.5],['6',.5],['5',.5],['3',.5]] },
+    { bass:'E4', m:[['2',.5],['3',.5],['5',.5],['6',.5]] },
+    { bass:'A3', m:[['5',.5],['3',.25],['2',.25],['3',.5],['2',.5]] },
+    { bass:'A3', m:[['2',.5],['3',.5],['5',.5],['6',.5]] }
+  ];
+  // 結尾段：A 段前七小節 + 收尾
+  const SECTION_END = SECTION_A.slice(0, 7).concat([
+    { bass:'D4', m:[['1',2]], end:true }
+  ]);
+  const SONG = SECTION_A.concat(SECTION_B, SECTION_END);
+  const SONG_BEATS_PER_BAR = 2;
+
+  // 刮奏：沿五聲音階快速掃弦（古箏招牌技巧）
+  const GLISS_UP = ["5,","6,","1","2","3","5","6","1'","2'","3'"];
+  let songPlaying = false;
+  let songSources = [];
+  let songTimers = [];
+  let songEndTimer = null;
 
   function playAccentPing(time){
     const osc = audioCtx.createOscillator();
@@ -886,6 +957,97 @@
     startScheduler();
   }
 
+  // ---------- 古箏演奏 ----------
+  function startSong(){
+    if(isPlaying) stop();
+    ensureAudio();
+    songPlaying = true;
+    songSources = [];
+    songTimers = [];
+    const vol = Math.max(volume, 0.001);
+    const spb = 60 / bpm;                 // 一拍幾秒（跟著目前 BPM）
+    const t0 = audioCtx.currentTime + 0.08;
+
+    // 開場刮奏
+    let t = t0;
+    GLISS_UP.forEach((n, i)=>{
+      songSources.push(playPluck(PITCH[n], t + i*0.035, vol*(0.4 + 0.4*i/GLISS_UP.length), { ring:0.3 }));
+    });
+    t += GLISS_UP.length*0.035 + spb*0.5;
+
+    let beatCount = 0;
+    SONG.forEach(bar=>{
+      // 左手低音：第一拍根音、第二拍五度
+      songSources.push(playPluck(BASS[bar.bass], t, vol*0.55, { bright:2600, ring: bar.end ? 1.4 : 0.5 }));
+      if(!bar.end) songSources.push(playPluck(BASS[FIFTH[bar.bass]], t + spb, vol*0.4, { bright:2600, ring:0.4 }));
+      // 右手旋律
+      let mt = t;
+      bar.m.forEach(([name, beats])=>{
+        if(name !== '0'){
+          const slide = name.endsWith('~');
+          const key = slide ? name.slice(0,-1) : name;
+          const onBeat = Math.abs((mt - t) % spb) < 1e-6;
+          songSources.push(playPluck(PITCH[key], mt, vol*(onBeat ? 0.95 : 0.78), {
+            bend: slide ? 0.06 : 0, bendTime: slide ? 0.14 : 0.09,
+            bright: onBeat ? 5200 : 4400,
+            ring: Math.max(0.25, beats*spb*0.9)
+          }));
+        }
+        mt += beats * spb;
+      });
+      // 畫面拍點跟著亮
+      for(let b=0;b<SONG_BEATS_PER_BAR;b++){
+        const when = t + b*spb;
+        const idx = beatCount % beatsPerBar;
+        songTimers.push(setTimeout(()=>{ if(songPlaying) lightBeat(idx); }, Math.max(0,(when - audioCtx.currentTime)*1000)));
+        beatCount++;
+      }
+      t += SONG_BEATS_PER_BAR * spb;
+    });
+    // 結尾：最後一個音後再刮奏一次收尾
+    const endAt = t - spb*2 + spb*0.02;
+    [...GLISS_UP].reverse().forEach((n, i)=>{
+      songSources.push(playPluck(PITCH[n], endAt + 0.01 + i*0.03, vol*0.35, { ring:0.3 }));
+    });
+
+    arm.classList.add('swinging');
+    songBtn.classList.add('playing');
+    songBtn.textContent = '■ 停止';
+    requestWakeLock();
+    setFooterHint('');
+    songEndTimer = setTimeout(()=>stopSong(true), (t - audioCtx.currentTime + 1.2)*1000);
+    triggerHaptic(20);
+  }
+
+  function stopSong(naturalEnd){
+    if(!songPlaying) return;
+    songPlaying = false;
+    clearTimeout(songEndTimer);
+    songTimers.forEach(clearTimeout);
+    songTimers = [];
+    if(!naturalEnd){
+      songSources.forEach(src=>{ try{ src.stop(); }catch(e){} });
+    }
+    songSources = [];
+    releaseWakeLock();
+    arm.classList.remove('swinging');
+    arm.style.transform = 'translateX(-50%) rotate(0deg)';
+    Array.from(beatsWrap.children).forEach(d=>d.classList.remove('on'));
+    songBtn.classList.remove('playing');
+    songBtn.textContent = '🎵 彈一曲';
+  }
+
+  function updateSongBtn(){
+    const show = soundStyle === 'guzheng';
+    songBtn.hidden = !show;
+    if(!show) stopSong();
+  }
+
+  songBtn.addEventListener('click', ()=>{
+    if(songPlaying) stopSong(); else startSong();
+  });
+  updateSongBtn();
+
   // ---------- Practice timer ----------
   function formatTime(sec){
     const m = Math.floor(sec / 60);
@@ -964,6 +1126,7 @@
 
   // ---------- Play / stop ----------
   function start(){
+    stopSong();
     isPlaying = true;
     ensureAudio();
     requestWakeLock();
@@ -1023,6 +1186,7 @@
 
   document.addEventListener('visibilitychange', ()=>{
     if(document.hidden){
+      if(songPlaying) stopSong();
       if(isPlaying){
         // 背景中 iOS 會凍結計時器與音訊，停止以免回來時拍子亂跳
         stop();
@@ -1037,7 +1201,7 @@
 })();
 
 // ---------- 版本與自動更新通知 ----------
-var APP_VERSION = '1.3.0';
+var APP_VERSION = '1.4.0';
 (function(){
   var verEl = document.getElementById('appVersion');
   if(verEl) verEl.textContent = 'v' + APP_VERSION;

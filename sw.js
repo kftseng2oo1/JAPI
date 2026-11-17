@@ -1,8 +1,8 @@
 // 木質節拍器 Service Worker
 // ⚠️ 每次更新 index.html 時，請同步修改 VERSION 與 NOTES（並與 index.html 的 APP_VERSION 一致），
 //    手機端才會偵測到新版並跳出更新通知。
-const VERSION = '1.3.0';
-const NOTES = '新增古箏撥弦音色、版本更新自動通知';
+const VERSION = '1.4.0';
+const NOTES = '古箏模式新增「彈一曲」：原創小曲《竹林踏歌》';
 const CACHE_NAME = 'metronome-' + VERSION;
 const ASSETS = [
   './',

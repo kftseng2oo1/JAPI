@@ -446,6 +446,11 @@
       <option value="beep">電子嗶聲</option>
       <option value="bell">清脆鈴音</option>
       <option value="guzheng">古箏撥弦</option>
+      <option value="bassdrum">大鼓</option>
+      <option value="snare">小鼓</option>
+      <option value="chime">風鈴</option>
+      <option value="rainstick">雨聲筒</option>
+      <option value="vibes">顫音琴</option>
     </select>
     <select id="timerSelect" aria-label="定時練習時長">
       <option value="0" selected>不限時</option>
@@ -847,6 +852,141 @@
   let songTimers = [];
   let songEndTimer = null;
 
+  // ---------- 打擊與環境音色（全部即時合成，不需音檔） ----------
+  let noiseBuf = null;
+  function getNoise(){
+    if(noiseBuf) return noiseBuf;
+    const sr = audioCtx.sampleRate, len = sr; // 1 秒白噪音，重複取用
+    noiseBuf = audioCtx.createBuffer(1, len, sr);
+    const d = noiseBuf.getChannelData(0);
+    for(let i=0;i<len;i++) d[i] = Math.random()*2 - 1;
+    return noiseBuf;
+  }
+  function noiseSource(time, dur, offset){
+    const src = audioCtx.createBufferSource();
+    src.buffer = getNoise();
+    src.start(time, offset != null ? offset : Math.random()*0.8, dur);
+    return src;
+  }
+  function envGain(time, peak, attack, decay){
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(0.0001, time);
+    g.gain.linearRampToValueAtTime(peak, time + attack);
+    g.gain.exponentialRampToValueAtTime(0.0001, time + attack + decay);
+    return g;
+  }
+
+  // 大鼓：低頻正弦快速下滑 + 鼓皮撞擊的短促噪音
+  function playBassDrum(time, accent, vol){
+    const osc = audioCtx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(accent ? 110 : 130, time);
+    osc.frequency.exponentialRampToValueAtTime(accent ? 42 : 52, time + 0.18);
+    const g = envGain(time, vol * (accent ? 1.0 : 0.75), 0.003, accent ? 0.55 : 0.35);
+    osc.connect(g); g.connect(audioCtx.destination);
+    osc.start(time); osc.stop(time + 0.65);
+
+    const n = noiseSource(time, 0.05);
+    const lp = audioCtx.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = 1800;
+    const ng = envGain(time, vol * 0.35, 0.001, 0.03);
+    n.connect(lp); lp.connect(ng); ng.connect(audioCtx.destination);
+  }
+
+  // 小鼓：鼓身短音 + 響弦（高通噪音）
+  function playSnare(time, accent, vol){
+    const osc = audioCtx.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(accent ? 240 : 210, time);
+    osc.frequency.exponentialRampToValueAtTime(150, time + 0.07);
+    const og = envGain(time, vol * 0.4, 0.001, 0.09);
+    osc.connect(og); og.connect(audioCtx.destination);
+    osc.start(time); osc.stop(time + 0.12);
+
+    const n = noiseSource(time, 0.25);
+    const hp = audioCtx.createBiquadFilter();
+    hp.type = 'highpass'; hp.frequency.value = 1400;
+    const bp = audioCtx.createBiquadFilter();
+    bp.type = 'peaking'; bp.frequency.value = 4500; bp.gain.value = 5;
+    const ng = envGain(time, vol * (accent ? 0.42 : 0.28), 0.001, accent ? 0.2 : 0.13);
+    n.connect(hp); hp.connect(bp); bp.connect(ng); ng.connect(audioCtx.destination);
+  }
+
+  // 風鈴：金屬管不和諧泛音，幾支隨機錯開輕敲
+  const CHIME_NOTES = [1046.5, 1174.66, 1396.91, 1567.98, 1760.0, 2093.0, 2349.32];
+  function playChimeBar(time, freq, vol){
+    [[1, 1], [2.76, 0.45], [5.40, 0.22], [8.93, 0.1]].forEach(([ratio, amp], i)=>{
+      const o = audioCtx.createOscillator();
+      o.type = 'sine';
+      o.frequency.value = freq * ratio;
+      const g = envGain(time, vol * amp, 0.002, 1.6 / (1 + i*0.8));
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(time); o.stop(time + 1.7);
+    });
+  }
+  function playChime(time, accent, vol){
+    const count = accent ? 4 : 2;
+    for(let i=0;i<count;i++){
+      // 重拍一定包含最高的那支，聽得出第一拍
+      const f = (accent && i === 0) ? CHIME_NOTES[CHIME_NOTES.length-1]
+              : CHIME_NOTES[Math.floor(Math.random()*(CHIME_NOTES.length-1))];
+      const delay = i === 0 ? 0 : 0.02 + Math.random()*0.12;
+      playChimeBar(time + delay, f, vol * (i === 0 ? 0.45 : 0.25) * (accent ? 1 : 0.8));
+    }
+  }
+
+  // 雨聲筒：大量細小顆粒（帶通噪音）由密到疏灑落
+  function playRainstick(time, accent, vol){
+    const spb = 60 / bpm;
+    const dur = Math.min(accent ? 0.9 : 0.6, spb * 0.9);
+    const grains = accent ? 46 : 28;
+    for(let i=0;i<grains;i++){
+      const r = Math.random();
+      const t = time + dur * r * r;           // 前段較密、後段較疏
+      const n = noiseSource(t, 0.012);
+      const bp = audioCtx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = 2500 + Math.random()*5500;
+      bp.Q.value = 6;
+      const fall = 1 - r * 0.7;
+      const g = envGain(t, vol * (0.25 + Math.random()*0.35) * fall * (accent ? 3.2 : 2.4), 0.0005, 0.01);
+      n.connect(bp); bp.connect(g); g.connect(audioCtx.destination);
+    }
+    // 開頭一下稍重的「沙」聲，讓拍點清楚
+    const head = noiseSource(time, 0.06);
+    const hbp = audioCtx.createBiquadFilter();
+    hbp.type = 'bandpass'; hbp.frequency.value = accent ? 3200 : 4200; hbp.Q.value = 1.5;
+    const hg = envGain(time, vol * (accent ? 0.9 : 0.6), 0.002, 0.05);
+    head.connect(hbp); hbp.connect(hg); hg.connect(audioCtx.destination);
+  }
+
+  // 顫音琴：金屬片（基音 + 4 倍、10 倍泛音）加上馬達造成的音量顫動
+  function playVibes(time, accent, vol){
+    const f = accent ? 880.0 : 659.26;       // 重拍 A5、一般拍 E5
+    const out = audioCtx.createGain();
+    out.gain.value = 1;
+    // 顫音：約 5.5Hz 的音量週期起伏
+    const lfo = audioCtx.createOscillator();
+    lfo.frequency.value = 5.5;
+    const depth = audioCtx.createGain();
+    depth.gain.value = 0.28;
+    lfo.connect(depth); depth.connect(out.gain);
+    lfo.start(time); lfo.stop(time + 1.5);
+
+    [[1, 1, 1.3], [4, 0.25, 0.35], [10, 0.08, 0.12]].forEach(([ratio, amp, decay])=>{
+      const o = audioCtx.createOscillator();
+      o.type = 'sine';
+      o.frequency.value = f * ratio;
+      const g = envGain(time, vol * amp * (accent ? 0.75 : 0.6), 0.002, decay);
+      o.connect(g); g.connect(out);
+      o.start(time); o.stop(time + decay + 0.05);
+    });
+    out.connect(audioCtx.destination);
+  }
+
+  // 只有這幾種音色疊加重拍高音提示，其他音色本身就有明顯的重拍差異
+  const PING_STYLES = { wood:1, beep:1, bell:1 };
+
   function playAccentPing(time){
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
@@ -865,10 +1005,25 @@
     if(volume <= 0) return;
     const effectiveVol = Math.max(volume, 0.001);
 
-    if(accent && soundStyle !== 'guzheng') playAccentPing(time);
+    if(accent && PING_STYLES[soundStyle]) playAccentPing(time);
 
     if(soundStyle === 'guzheng'){
       playGuzheng(time, accent, effectiveVol);
+
+    } else if(soundStyle === 'bassdrum'){
+      playBassDrum(time, accent, effectiveVol);
+
+    } else if(soundStyle === 'snare'){
+      playSnare(time, accent, effectiveVol);
+
+    } else if(soundStyle === 'chime'){
+      playChime(time, accent, effectiveVol);
+
+    } else if(soundStyle === 'rainstick'){
+      playRainstick(time, accent, effectiveVol);
+
+    } else if(soundStyle === 'vibes'){
+      playVibes(time, accent, effectiveVol);
 
     } else if(soundStyle === 'wood'){
       // Woodblock sound simulation using filtered noise/sine combo or high-Q oscillators
@@ -1201,7 +1356,7 @@
 })();
 
 // ---------- 版本與自動更新通知 ----------
-var APP_VERSION = '1.4.0';
+var APP_VERSION = '1.5.0';
 (function(){
   var verEl = document.getElementById('appVersion');
   if(verEl) verEl.textContent = 'v' + APP_VERSION;
